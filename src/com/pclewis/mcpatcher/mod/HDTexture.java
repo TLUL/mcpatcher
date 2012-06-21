@@ -65,6 +65,10 @@ public class HDTexture extends Mod {
             classMods.add(new ColorizerMod("ColorizerFoliage", "/misc/foliagecolor.png"));
         }
 
+        if (minecraftVersion.compareTo("12w22a") < 0) {
+            classMods.add(new GuiContainerCreativeMod());
+        }
+
         filesToAdd.add(ClassMap.classNameToFilename(MCPatcherUtils.TILE_SIZE_CLASS));
         filesToAdd.add(ClassMap.classNameToFilename(MCPatcherUtils.TEXTURE_UTILS_CLASS));
         filesToAdd.add(ClassMap.classNameToFilename(MCPatcherUtils.TEXTURE_UTILS_CLASS + "$1"));
@@ -430,6 +434,8 @@ public class HDTexture extends Mod {
 
     private class TextureFXMod extends ClassMod {
         TextureFXMod() {
+            final MethodRef bindImage = new MethodRef(getDeobfClass(), "bindImage", "(LRenderEngine;)V");
+
             classSignatures.add(new FixedBytecodeSignature(
                 SIPUSH, 0x04, 0x00, // 1024
                 NEWARRAY, T_BYTE
@@ -444,7 +450,56 @@ public class HDTexture extends Mod {
             memberMappers.add(new FieldMapper(new FieldRef(getDeobfClass(), "imageData", "[B")));
             memberMappers.add(new FieldMapper(new FieldRef(getDeobfClass(), "tileNumber", "I"), null, new FieldRef(getDeobfClass(), "tileSize", "I"), new FieldRef(getDeobfClass(), "tileImage", "I")));
 
+            memberMappers.add(new MethodMapper(bindImage));
+
             patches.add(new TileSizePatch.ArraySizePatch(1024, "int_numBytes"));
+
+            patches.add(new BytecodePatch.InsertBefore() {
+                @Override
+                public String getDescription() {
+                    return "check for bindImage recursion (end)";
+                }
+
+                @Override
+                public String getMatchExpression() {
+                    return buildExpression(
+                        RETURN
+                    );
+                }
+
+                @Override
+                public byte[] getInsertBytes() throws IOException {
+                    return buildCode(
+                        reference(INVOKESTATIC, new MethodRef(MCPatcherUtils.TEXTURE_UTILS_CLASS, "bindImageEnd", "()V"))
+                    );
+                }
+            }.targetMethod(bindImage));
+
+            patches.add(new BytecodePatch() {
+                @Override
+                public String getDescription() {
+                    return "check for bindImage recursion (start)";
+                }
+
+                @Override
+                public String getMatchExpression() {
+                    return buildExpression(
+                        BinaryRegex.begin()
+                    );
+                }
+
+                @Override
+                public byte[] getReplacementBytes() throws IOException {
+                    return buildCode(
+                        reference(INVOKESTATIC, new MethodRef(MCPatcherUtils.TEXTURE_UTILS_CLASS, "bindImageBegin", "()Z")),
+                        IFNE, branch("A"),
+
+                        RETURN,
+
+                        label("A")
+                    );
+                }
+            }.targetMethod(bindImage));
         }
     }
 
@@ -653,7 +708,7 @@ public class HDTexture extends Mod {
                 memberMappers.add(new FieldMapper(new FieldRef(getDeobfClass(), "alternateFontRenderer", "LFontRenderer;")));
             }
 
-            patches.add(new BytecodePatch() {
+            patches.add(new BytecodePatch.InsertAfter() {
                 @Override
                 public String getDescription() {
                     return "TextureUtils.setTileSize(), renderEngine.setTileSize() on startup";
@@ -661,22 +716,30 @@ public class HDTexture extends Mod {
 
                 @Override
                 public String getMatchExpression() {
-                    return BinaryRegex.capture(buildExpression(
+                    return buildExpression(
+                        // renderEngine = new RenderEngine(texturePackList, gameSettings);
                         ALOAD_0,
                         reference(NEW, new ClassRef("RenderEngine")),
-                        BinaryRegex.any(0, 18),
-                        PUTFIELD, BinaryRegex.capture(BinaryRegex.any(2))
-                    ));
+                        BinaryRegex.nonGreedy(BinaryRegex.any(0, 18)),
+                        PUTFIELD, BinaryRegex.capture(BinaryRegex.any(2)),
+
+                        // fontRenderer = new FontRenderer(gameSettings, "/font/default.png", renderEngine, false);
+                        // ...
+                        // standardGalacticFontRenderer = new FontRenderer(gameSettings, "/font/alternate.png", renderEngine, false);
+                        BinaryRegex.any(0, 60),
+                        reference(NEW, new ClassRef("FontRenderer")),
+                        BinaryRegex.nonGreedy(BinaryRegex.any(0, 20)),
+                        BytecodeMatcher.anyReference(PUTFIELD)
+                    );
                 }
 
                 @Override
-                public byte[] getReplacementBytes() throws IOException {
+                public byte[] getInsertBytes() throws IOException {
                     return buildCode(
-                        getCaptureGroup(1),
                         reference(INVOKESTATIC, new MethodRef(MCPatcherUtils.TEXTURE_UTILS_CLASS, "setTileSize", "()Z")),
                         POP,
                         ALOAD_0,
-                        GETFIELD, getCaptureGroup(2),
+                        GETFIELD, getCaptureGroup(1),
                         ALOAD_0,
                         reference(INVOKEVIRTUAL, new MethodRef("RenderEngine", "setTileSize", "(LMinecraft;)V"))
                     );
@@ -1123,6 +1186,36 @@ public class HDTexture extends Mod {
         @Override
         public String getDeobfClass() {
             return name;
+        }
+    }
+
+    private class GuiContainerCreativeMod extends ClassMod {
+        GuiContainerCreativeMod() {
+            global = true;
+
+            classSignatures.add(new ConstSignature("/gui/allitems.png"));
+
+            patches.add(new BytecodePatch.InsertBefore() {
+                @Override
+                public String getDescription() {
+                    return "use allitemsx.png for creative mode inventory background";
+                }
+
+                @Override
+                public String getMatchExpression() {
+                    return buildExpression(
+                        push("/gui/allitems.png")
+                    );
+                }
+
+                @Override
+                public byte[] getInsertBytes() throws IOException {
+                    return buildCode(
+                        push(true),
+                        reference(PUTSTATIC, new FieldRef(MCPatcherUtils.TEXTURE_UTILS_CLASS, "oldCreativeGui", "Z"))
+                    );
+                }
+            });
         }
     }
 }
